@@ -1,0 +1,96 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+          - both
+      tag:
+        description: 'Docker tag (from GCP Artifact Registry) to rollback to'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  GCP_PROJECT_ID: ghost-traffic-analytics
+  GCP_WORKFLOW_IDENTITY_PROVIDER: projects/460065119042/locations/global/workloadIdentityPools/github-oidc-analytics/providers/github-provider-analytics
+  DOCKER_IMAGE: europe-docker.pkg.dev/ghost-traffic-analytics/traffic-analytics/traffic-analytics
+
+jobs:
+  generate-environments:
+    name: "Generate Environments"
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.generate-environments.outputs.environments }}
+    steps:
+      - name: Generate Environments
+        id: generate-environments
+        run: |
+          case ${{ github.event.inputs.environment }} in
+            both)
+              echo 'environments=["staging", "production"]' >> $GITHUB_OUTPUT
+              ;;
+            production)
+              echo 'environments=["production"]' >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo 'environments=["staging"]' >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo 'environments=[]' >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+  rollback:
+    name: Rollback
+    needs: generate-environments
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJSON(needs.generate-environments.outputs.environments) }}
+        region: [europe-west4]
+        include:
+          - region: europe-west4
+            region_name: netherlands
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Deploy (${{ matrix.environment }} | ${{ matrix.region }})"
+        uses: "./.github/actions/deploy-gcp-cloud-run"
+        with:
+          environment: ${{ matrix.environment }}
+          region: ${{ matrix.region }}
+          service: >-
+            ${{ contains(matrix.environment, 'staging') && 'stg' || 'prd' }}-${{ matrix.region_name }}-traffic-analytics
+          image: ${{ env.DOCKER_IMAGE }}:${{ inputs.tag }}
+
+      - name: Send slack notification for rollback
+        uses: slackapi/slack-github-action@v2.1.1
+        if: always()
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "Traffic Analytics Rollback: ${{ job.status }} (${{ matrix.environment }})"
+            blocks:
+              - type: "section"
+                text:
+                  type: "mrkdwn"
+                  text: "${{ job.status == 'success' && ':leftwards_arrow_with_hook: *Traffic Analytics Rollback Completed*' || ':x: *Traffic Analytics Rollback Failed*' }}"
+              - type: "section"
+                fields:
+                  - type: "mrkdwn"
+                    text: "*Environment:*\n:gear: ${{ matrix.environment }}"
+                  - type: "mrkdwn"
+                    text: "*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+            attachments:
+              - color: "${{ job.status == 'success' && 'warning' || 'danger' }}"
+                fallback: "Traffic Analytics Rollback: ${{ job.status }}"
