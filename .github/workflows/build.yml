@@ -7,7 +7,7 @@ on:
       - main
 
 jobs:
- build-and-push:
+  build-and-push:
     name: Build & Push to Docker Hub
     runs-on: ubuntu-latest
     steps:
@@ -43,4 +43,3 @@ jobs:
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
